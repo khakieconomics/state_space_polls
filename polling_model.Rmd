@@ -154,7 +154,7 @@ get_first_date <- function(x){
 }
 
 # Convert dates to dates, impute MoE for missing polls with average of non-missing, 
-# and convert MoE to standard deviation (assuming MoE is the full 95% two sided interval length??)
+# and convert MoE to standard deviation (assuming MoE is the full 95% one sided interval length??)
 polls <- polls %>% 
   mutate(start_date = get_first_date(Date)[[1]],
          end_date = get_first_date(Date)[[2]],
@@ -162,7 +162,7 @@ polls <- polls %>%
          MoE = as.numeric(MoE))%>% 
   select(end_date, `Clinton (D)`, `Trump (R)`, MoE) %>% 
   mutate(MoE = ifelse(is.na(MoE), mean(MoE, na.rm = T), MoE),
-         sigma = MoE/4) %>% 
+         sigma = MoE/2) %>% 
   arrange(end_date)
 
 
