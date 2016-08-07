@@ -1,0 +1,262 @@
+---
+title: "State space poll averaging model"
+author: "Jim Savage"
+date: "4 August 2016"
+output: 
+  html_document:
+    theme: united
+---
+
+This tutorial covers how to build a low-to-high frequency interpolation
+model in which we have possibly many sources of information that occur
+at various frequencies. The example I'll use is drawing inference about
+the preference shares of Clinton and Trump in the current presidential 
+campaign. This is a good example for this sort of imputation: 
+
+- Data (polls) are sporadically released. Sometimes we have many released
+simultaneously; at other times there may be many days with no releases. 
+- The various polls don't necessarily agree. They might have different methodologies
+or sampling issues, resulting in quite different outcomes. We want to build
+a model that can incorporate this. 
+
+There are two ingredients to the polling model. A multi-measurement model,
+typified by Rubin's 8 schools example. And a state-space model. Let's briefly 
+describe these. 
+
+### Multi-measurement model and the 8 schools example
+
+Let's say we run a randomized control trial in 8 schools. Each school $i$ reports
+its own treatment effect $te_{i}$, which has a standard error $\sigma_{i}$. There
+are two questions the 8-schools model tries to answer: 
+
+- If you administer the experiment at one of these schools, say, school 1, and have your estimate 
+of the treatment effect $te_{1}$, what do you expect would be the treatment effect if 
+you were to run the experiment again? In particular, would your expectations of the 
+treatment effect in the next experiment change once you learn the treatment effects estimated
+from the experiments in the other schools? 
+- If you roll out the experiment at a new school (school $9$), what do we expect the 
+treatment effect to be? 
+
+The statistical model that Rubin proposed is that each school has its own _true_ 
+latent treatment effect $y_{i}$, around which our treatment effects are distributed.
+
+$$
+te_{i} \sim \mathcal{N}(y_{i}, \sigma_{i})
+$$
+
+These "true" but unobserved treatment effects are in turn distributed according to 
+a common hyper-distribution with mean $\mu$ and standard deviation $\tau$
+
+$$
+y_{i} \sim \mathcal{N}(\mu, \tau)
+$$
+
+Once we have priors for $\mu$ and $\tau$, we can estimate the above model with Bayesian 
+methods. 
+
+
+### A state-space model
+
+State-space models are a useful way of dealing with noisy or incomplete data,
+like our polling data. The idea is that we can divide our model into two parts:
+
+- **The state**. We don't observe the state; it is a latent variable. But we know
+how it changes through time (or at least how large its potential changes are).
+- **The measurement**. Our state is measured with imprecision. The measurement
+model is the distribution of the data that we observe around the state. 
+
+A simple example might be consumer confidence, an unobservable latent construct
+about which our survey responses should be distributed. So our state-space model would be:
+
+The state
+
+$$
+conf_{t} \sim \mathcal{N}(conf_{t-1}, \sigma)
+$$
+
+which simply says that consumer confidence is a random walk with normal innovations
+with a standard deviation $\sigma$, and 
+
+$$
+\mbox{survey_measure}_{t} \sim \mathcal{N}(conf_{t}, \tau)
+$$
+
+which says that our survey measures are normally distributed around the true latent 
+state, with standard deviation $\tau$. 
+
+Again, once we provide priors for the initial value of the state $conf_{0}$ and $\tau$, 
+we can estimate this model quite easily. 
+
+The important thing to note is that we have a model for the state even if there
+is no observed measurement. That is, we know (the distribution for) how consumer confidence should progress
+even for the periods in which there are no consumer confidence surveys. This makes
+state-space models ideal for data with irregular frequencies or missing data. 
+
+### Putting it together
+
+As you can see, these two models are very similar: they involve making inference
+about a latent quantity from noisy measurements. The first shows us how we can aggregate 
+many noisy measurements together _within a single time period_, while the second
+shows us how to combine irregular noisy measures _over time_. We can now combine
+these two models to aggregate multiple polls over time. 
+
+The data generating process I had in mind is a very simple model where each candidate's
+preference share is an unobserved state, which polls try to measure. Unlike some
+volatile poll aggregators, I assume that the unobserved state can move according
+to a random walk with normal disturbances of standard deviation .25%. This greatly
+smoothes out the sorts of fluctuations we see around the conventions etc. We could 
+estimate this parameter using fairly tight priors, but I just hard-code it in for simplicity. 
+
+That is, we have the state for candidate $c$ in time $t$ evolving according to
+
+$$
+\mbox{Vote share}_{c, t} \sim \mathcal{N} (\mbox{Vote share}_{c, t-1}. 0.25)
+$$
+
+with measurements being made of this in the polls. Each poll $p$ at time $t$ is
+distributed according to 
+
+$$
+\mbox{poll}_{c, p, t} \sim \mathcal{N} (\mbox{Vote share}_{c, t}. \tau)
+$$
+
+I give an initial state prior of 50% to Clinton and a 30% prior to Trump May of last year. As we get further
+from that initial period, the impact of the prior is dissipated. 
+
+The code to download the data, run the model (in the attached zip file)
+is below. You will need to have the dev version of ggplot2 installed. 
+
+```{r, results = "hide", message = F, warning = F}
+library(rvest); library(dplyr); library(ggplot2); library(rstan); library(reshape2); library(stringr); library(lubridate)
+options(mc.cores = parallel::detectCores())
+source("theme.R")
+
+# The polling data
+realclearpolitics_all <- read_html("http://www.realclearpolitics.com/epolls/2016/president/us/general_election_trump_vs_clinton-5491.html#polls")
+
+# Scrape the data
+polls <- realclearpolitics_all %>% 
+  html_node(xpath = '//*[@id="polling-data-full"]/table') %>% 
+  html_table() %>% 
+  filter(Poll != "RCP Average")
+
+# Function to convert string dates to actual dates
+get_first_date <- function(x){
+  last_year <- cumsum(x=="12/22 - 12/23")>0
+  dates <- str_split(x, " - ")
+  dates <- lapply(1:length(dates), function(x) as.Date(paste0(dates[[x]], 
+                                                              ifelse(last_year[x], "/2015", "/2016")), 
+                                                       format = "%m/%d/%Y"))
+  first_date <- lapply(dates, function(x) x[1]) %>% unlist
+  second_date <- lapply(dates, function(x) x[2])%>% unlist
+  data_frame(first_date = as.Date(first_date, origin = "1970-01-01"), 
+             second_date = as.Date(second_date, origin = "1970-01-01"))
+}
+
+# Convert dates to dates, impute MoE for missing polls with average of non-missing, 
+# and convert MoE to standard deviation (assuming MoE is the full 95% two sided interval length??)
+polls <- polls %>% 
+  mutate(start_date = get_first_date(Date)[[1]],
+         end_date = get_first_date(Date)[[2]],
+         N = as.numeric(gsub("[A-Z]*", "", Sample)),
+         MoE = as.numeric(MoE))%>% 
+  select(end_date, `Clinton (D)`, `Trump (R)`, MoE) %>% 
+  mutate(MoE = ifelse(is.na(MoE), mean(MoE, na.rm = T), MoE),
+         sigma = MoE/4) %>% 
+  arrange(end_date)
+
+
+# Stretch out to get missing values for days with no polls
+polls3 <- left_join(data_frame(end_date = seq(from = min(polls$end_date), 
+                                              to= as.Date("2016-08-04"), 
+                                              by = "day")), polls) %>% 
+  group_by(end_date) %>%
+  mutate(N = 1:n()) %>%
+  rename(Clinton = `Clinton (D)`,
+         Trump = `Trump (R)`)
+
+
+# One row for each day, one column for each poll on that day, -9 for missing values
+Y_clinton <- polls3 %>% dcast(end_date ~ N, value.var = "Clinton") %>% 
+  dplyr::select(-end_date) %>% 
+  as.data.frame %>% as.matrix
+Y_clinton[is.na(Y_clinton)] <- -9
+
+Y_trump <- polls3 %>% dcast(end_date ~ N, value.var = "Trump") %>% 
+  dplyr::select(-end_date) %>% 
+  as.data.frame %>% as.matrix
+Y_trump[is.na(Y_trump)] <- -9
+
+# Do the same for margin of errors for those polls
+sigma <- polls3 %>% dcast(end_date ~ N, value.var = "sigma")%>% 
+  dplyr::select(-end_date)%>% 
+  as.data.frame %>% as.matrix
+sigma[is.na(sigma)] <- -9
+
+# Run the two models
+
+clinton_model <- stan("state_space_polls.stan", 
+                      data = list(T = nrow(Y_clinton), 
+                                  polls = ncol(Y_clinton), 
+                                  Y = Y_clinton, 
+                                  sigma = sigma,
+                                  initial_prior = 50))
+
+trump_model <- stan("state_space_polls.stan", 
+                    data = list(T = nrow(Y_trump), 
+                                polls = ncol(Y_trump), 
+                                Y = Y_trump, 
+                                sigma = sigma,
+                                initial_prior = 30))
+
+
+# Pull the state vectors
+
+mu_clinton <- extract(clinton_model, pars = "mu", permuted = T)[[1]] %>% 
+  as.data.frame
+
+mu_trump <- extract(trump_model, pars = "mu", permuted = T)[[1]] %>% 
+  as.data.frame
+
+# Rename to get dates
+names(mu_clinton) <- unique(paste0(polls3$end_date))
+names(mu_trump) <- unique(paste0(polls3$end_date))
+
+
+# summarise uncertainty for each date
+
+mu_ts_clinton <- mu_clinton %>% melt %>% 
+  mutate(date = as.Date(variable)) %>% 
+  group_by(date) %>% 
+  summarise(median = median(value),
+            lower = quantile(value, 0.025),
+            upper = quantile(value, 0.975),
+            candidate = "Clinton")
+
+mu_ts_trump <- mu_trump %>% melt %>% 
+  mutate(date = as.Date(variable)) %>% 
+  group_by(date) %>% 
+  summarise(median = median(value),
+            lower = quantile(value, 0.025),
+            upper = quantile(value, 0.975),
+            candidate = "Trump")
+
+# Plot results
+
+
+bind_rows(mu_ts_clinton, mu_ts_trump) %>% 
+  ggplot(aes(x = date)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = candidate),alpha = 0.1) +
+  geom_line(aes(y = median, colour = candidate)) +
+  ylim(30, 60) +
+  scale_colour_manual(values = c("blue", "red"), "Candidate") +
+  scale_fill_manual(values = c("blue", "red"), guide = F) +
+  geom_point(data = polls3, aes(x = end_date, y = `Clinton`), size = 0.2, colour = "blue") +
+  geom_point(data = polls3, aes(x = end_date, y = Trump), size = 0.2, colour = "red") +
+  theme_lendable() + # Thanks to my employer for their awesome theme!
+  xlab("Date") +
+  ylab("Implied vote share") +
+  ggtitle("Poll aggregation with state-space smoothing", 
+          subtitle= paste("Prior of 50% initial for Clinton, 30% for Trump on", min(polls3$end_date)))
+
+```
